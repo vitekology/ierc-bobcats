@@ -103,14 +103,6 @@ Note: `ggeffects::ggpredict()` is used for marginal predictions (scripts 08 and 
 
 ---
 
-## Citation
-
-Please cite both the manuscript and this repository:
-
-> Wengert GM, Jirinec V, et al. (2026). Code and data for: Habitat selection of bobcats in California and southern Oregon forests. Zenodo. https://doi.org/[DOI pending]
-
----
-
 ## Contact
 
 Greta M. Wengert — gwengert@iercecology.org  
