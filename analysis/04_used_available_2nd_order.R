@@ -1,84 +1,47 @@
-###
-# Bobcat Habitat Selection - Used and available point generation (2nd-order RSF)
-# Wengert et al. 2026, Ecology and Evolution
-#
-# Processes iNaturalist bobcat observations (curated from GBIF), filters to
-# the study extent and 2010-2020, generates systematically-placed available
-# points (10x used) across the study extent, erases available points within
-# 79 m of used points (mean reported positional accuracy = 79 m), and exports
-# for ArcGIS habitat annotation.
-#
-# The exported files were annotated with habitat raster values in ArcGIS Pro
-# 2.9. The annotated output is provided directly in data/annotated/ so this
-# script does not need to be re-run to reproduce RSF modeling (script 06).
-#
-# Input:  data/iNaturalist/LR.csv, LRF.csv
-#         data/iNaturalist/study_extent.shp
-# Output: data/annotated/iNat_used_available.csv
-#         data/annotated/iNat_used_available.shp
-#
-###
+# Used (iNaturalist bobcat records) and available points, 2nd-order RSF
+# Available points: target-group background (1-km cells with >= K_MIN mammal records)
 
 library(tidyverse)
-library(lubridate)
 library(sf)
+source("analysis/settings.R")
 
-inat_dir      <- "data/iNaturalist"
-annotated_dir <- "data/annotated"
-dir.create(annotated_dir, showWarnings = FALSE)
+set.seed(20261001)
 
-## ---- load and filter iNaturalist observations --------------------------------
+inat_dir <- "data/iNaturalist"
+out_dir  <- "output/2nd_order"
+CELL_M   <- 1000
+RATIO    <- 100
+dir.create("data/annotated", showWarnings = FALSE, recursive = TRUE)
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
-LR  <- read.csv(file.path(inat_dir, "LR.csv"),  as.is = TRUE)
-LRF <- read.csv(file.path(inat_dir, "LRF.csv"), as.is = TRUE)
-df  <- rbind(LR, LRF)
+extent <- st_read(EXTENT, quiet = TRUE) |> st_transform(3310) |> st_union() |> st_make_valid()
 
-# temporal filter: 2010-2020
-df$observed_on <- ymd(df$observed_on, tz = "America/Los_Angeles")
-df$year        <- as.integer(format(df$observed_on, "%Y"))
-df <- subset(df, year > 2009 & year < 2021)
+read_pts <- function(f) read_csv(file.path(inat_dir, f), show_col_types = FALSE) |>
+  st_as_sf(coords = c("X", "Y"), crs = 3310, remove = FALSE)
+bobcat <- read_pts("inat_bobcat_filtered.csv") |> mutate(species = "Lynx rufus")
+tg     <- bind_rows(select(bobcat, id, species, user_id, year),
+                    select(read_pts("inat_targetgroup_filtered.csv"), id, species, user_id, year))
 
-# spatial filter: remove obscured locations and positional accuracy > 500 m
-df <- subset(df, coordinates_obscured == "false")
-df <- subset(df, positional_accuracy <= 500 | is.na(positional_accuracy))
+bb    <- st_bbox(extent)
+grid  <- st_make_grid(extent, cellsize = CELL_M, offset = floor(bb[c("xmin", "ymin")] / CELL_M) * CELL_M) |>
+  st_sf(geometry = _)
+cells <- grid[st_within(grid, extent, sparse = FALSE)[, 1], ]
+cells$n_records <- lengths(st_intersects(cells, tg))
+cells$n_bobcat  <- lengths(st_intersects(cells, bobcat))
+st_write(cells, file.path(out_dir, "targetgroup_cells.gpkg"), delete_dsn = TRUE, quiet = TRUE)
 
-## ---- spatial operations ------------------------------------------------------
+domain <- cells |> filter(n_records >= K_MIN) |> st_union() |> st_make_valid()
+used   <- st_filter(bobcat, domain)
+xy     <- st_coordinates(st_sample(domain, size = RATIO * nrow(used), type = "random", exact = TRUE))
 
-df.sp <- st_as_sf(df, coords = c("longitude", "latitude"), crs = 4326)
-df.sp <- st_transform(df.sp, st_crs(3310))
+df <- bind_rows(tibble(case = 1L, id = used$id, year = as.integer(used$year), X = used$X, Y = used$Y),
+                tibble(case = 0L, id = NA, year = NA_integer_, X = xy[, 1], Y = xy[, 2]))
+write_csv(df, "data/annotated/used_available_2nd_order.csv")
+print(count(df, case))
 
-# clip to study extent
-extent <- st_read(file.path(inat_dir, "study_extent.shp"))
-extent <- st_transform(extent, st_crs(3310))
-df.sp.extent <- st_intersection(df.sp, extent)
-
-message("iNat observations in study extent: n = ", nrow(df.sp.extent))
-
-# generate available points (10x used, systematic)
-inat.ap <- st_sample(extent, size = 10 * nrow(df.sp.extent), type = "regular")
-
-# mean positional accuracy: 79 m; buffer and erase
-df.sp.extent.buff <- st_union(st_buffer(df.sp.extent, 79))
-inat.ap.ready     <- st_difference(inat.ap, df.sp.extent.buff)
-
-## ---- assemble and export ----------------------------------------------------
-
-ap_df      <- as.data.frame(st_coordinates(inat.ap.ready))
-ap_df$year <- NA; ap_df$case <- 0
-
-up_df      <- as.data.frame(st_coordinates(df.sp.extent))
-up_df$year <- df.sp.extent$year; up_df$case <- 1
-
-df.ready <- rbind(up_df, ap_df)
-
-write.csv(df.ready,
-          file.path(annotated_dir, "iNat_used_available.csv"),
-          row.names = FALSE)
-
-df.ready.sf <- st_as_sf(df.ready, coords = c("X", "Y"), crs = st_crs(3310))
-st_write(df.ready.sf,
-         file.path(annotated_dir, "iNat_used_available.shp"),
-         delete_layer = TRUE)
-
-message("2nd-order used/available exported: n = ", nrow(df.ready),
-        " (", sum(df.ready$case), " used, ", sum(df.ready$case == 0), " available)")
+png(file.path(out_dir, "availability_map.png"), width = 1000, height = 2000, res = 170)
+par(mar = c(1, 1, 1, 1))
+plot(extent, col = "grey95", border = "grey40")
+plot(domain, col = "steelblue", border = NA, add = TRUE)
+points(used$X, used$Y, pch = 16, cex = 0.5, col = "red")
+dev.off()

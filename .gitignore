@@ -3,3 +3,6 @@
 .RData
 .Ruserdata
 .positai
+analysis/paths_local.R
+analysis/00_camera_compilation.R
+output/
